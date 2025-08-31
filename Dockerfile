@@ -1,5 +1,4 @@
 ##################################################################################
-# Frontend builder stage
 FROM --platform=$BUILDPLATFORM node:20-alpine AS plik-frontend-builder
 
 # Install needed binaries
@@ -9,11 +8,9 @@ RUN apk add --no-cache git make bash
 COPY Makefile .
 COPY webapp /webapp
 
-# Build frontend assets
 RUN make clean-frontend frontend
 
 ##################################################################################
-# Backend builder stage  
 FROM --platform=$BUILDPLATFORM golang:1-bullseye AS plik-builder
 
 # Install needed binaries
@@ -38,14 +35,19 @@ ENV CC=$CC
 # Add the source code
 COPY . .
 
-# Build the application
-RUN releaser/releaser.sh
+# Build manually (bypasses git issues with releaser.sh)
+RUN echo "Building Plik manually..." && \
+    make server && \
+    mkdir -p release/server && \
+    mkdir -p release/webapp && \
+    cp server/plikd release/server/ && \
+    cp server/plikd.cfg release/server/ && \
+    cp -r webapp/dist release/webapp/ && \
+    chmod +x release/server/plikd
 
 ##################################################################################
-# Final runtime image
-FROM alpine:3.18
+FROM alpine:3.18 AS plik-image
 
-# Install ca-certificates
 RUN apk add --no-cache ca-certificates
 
 # Create plik user
@@ -60,22 +62,27 @@ RUN adduser \
     --uid "${UID}" \
     "${USER}"
 
-# Copy built application
 COPY --from=plik-builder --chown=1000:1000 /go/src/github.com/root-gg/plik/release /home/plik/
 
-# Create a startup script that sets proper MIME types
-COPY <<EOF /home/plik/fix-mime.sh
+# Create startup script that handles MIME types for bind mounts
+RUN cat > /home/plik/start-with-mime-fix.sh << 'EOF'
 #!/bin/sh
 
 # Function to set proper MIME types for mounted files
 fix_webapp_permissions() {
     if [ -d "/home/plik/webapp/dist" ]; then
-        echo "Setting proper permissions and MIME type associations for webapp files..."
-        find /home/plik/webapp/dist -name "*.css" -exec file {} \; | head -5
-        find /home/plik/webapp/dist -name "*.js" -exec file {} \; | head -5
+        echo "Setting proper permissions and checking MIME types for webapp files..."
         
         # Ensure files are readable
         chmod -R 755 /home/plik/webapp/dist 2>/dev/null || true
+        
+        # Check file types (for debugging)
+        if [ -f "/home/plik/webapp/dist/css/app.css" ]; then
+            echo "CSS file type: $(file /home/plik/webapp/dist/css/app.css)"
+        fi
+        if [ -f "/home/plik/webapp/dist/js/app.js" ]; then
+            echo "JS file type: $(file /home/plik/webapp/dist/js/app.js)"
+        fi
         
         # Create/update mime.types if needed
         if [ ! -f "/home/plik/mime.types" ]; then
@@ -96,6 +103,8 @@ application/font-woff           woff
 application/font-woff2          woff2
 MIME
         fi
+        
+        echo "MIME types configuration created at /home/plik/mime.types"
     fi
 }
 
@@ -105,17 +114,19 @@ export PLIK_MIME_TYPES_FILE="/home/plik/mime.types"
 # Fix permissions and MIME types
 fix_webapp_permissions
 
+echo "Starting Plik server with MIME type fixes..."
+
 # Start the plik server
 cd /home/plik/server
 exec ./plikd
 EOF
 
-RUN chmod +x /home/plik/fix-mime.sh && chown plik:plik /home/plik/fix-mime.sh
+RUN chmod +x /home/plik/start-with-mime-fix.sh && chown plik:plik /home/plik/start-with-mime-fix.sh
 
-# Create webapp directory structure for bind mounting
+# Create directories for bind mounts  
 RUN mkdir -p /home/plik/webapp/dist && chown -R plik:plik /home/plik/webapp
 
 EXPOSE 8080
 USER plik
 WORKDIR /home/plik
-CMD ["/home/plik/fix-mime.sh"]
+CMD ["/home/plik/start-with-mime-fix.sh"]
