@@ -35,9 +35,16 @@ ENV CC=$CC
 # Add the source code
 COPY . .
 
-# Build manually (bypasses git issues with releaser.sh)
-RUN echo "Building Plik manually..." && \
-    make server && \
+# Build manually without any git dependencies
+RUN echo "Building Plik server manually without git..." && \
+    cd server && \
+    echo 'package common; const buildInfoString = "docker-build"' > common/build_info.go && \
+    go mod download && \
+    CGO_ENABLED=0 GOOS=linux go build \
+        -ldflags="-X github.com/root-gg/plik/server/common.buildInfoString=docker-build -w -s -extldflags=-static" \
+        -tags "osusergo,netgo,sqlite_omit_load_extension" \
+        -o plikd . && \
+    cd .. && \
     mkdir -p release/server && \
     mkdir -p release/webapp && \
     cp server/plikd release/server/ && \
